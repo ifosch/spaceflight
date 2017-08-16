@@ -25,10 +25,6 @@ func (m mockRDSClient) DescribeDBSnapshots(
 	err error,
 ) {
 	dbSnapshots := m.dbSnapshots[*describeParams.DBInstanceIdentifier]
-	if len(dbSnapshots) == 0 {
-		err = errors.New("Snapshot not found")
-		return
-	}
 	result = &rds.DescribeDBSnapshotsOutput{
 		DBSnapshots: dbSnapshots,
 	}
@@ -274,6 +270,19 @@ var createDBInstanceCases = []createDBInstanceCase{
 		expectedError:        "",
 		snapshot:             exampleSnapshot1,
 	},
+	// Uses non existing snapshot to copy from
+	{
+		name:                 "Uses non existing snapshot to copy from",
+		identifier:           "test1",
+		instanceType:         "db.m1.small",
+		masterUser:           "master",
+		masterUserPassword:   "master",
+		size:                 6144,
+		originalInstanceName: "develop",
+		endpoint:             "",
+		expectedError:        "Couldn't find snapshot for develop instance",
+		snapshot:             exampleSnapshot1,
+	},
 	// Uses snapshot to restore from
 	{
 		name:                 "Uses snapshot to restore from",
@@ -288,6 +297,20 @@ var createDBInstanceCases = []createDBInstanceCase{
 		expectedError:        "",
 		snapshot:             exampleSnapshot1,
 	},
+	// Uses non existing snapshot to restore from
+	{
+		name:                 "Uses non existing snapshot to restore from",
+		identifier:           "test1",
+		instanceType:         "db.m1.small",
+		masterUser:           "master",
+		masterUserPassword:   "master",
+		size:                 6144,
+		originalInstanceName: "develop",
+		restore:              true,
+		endpoint:             "",
+		expectedError:        "Couldn't find snapshot for develop instance",
+		snapshot:             exampleSnapshot1,
+	},
 }
 
 func TestCreateDB(t *testing.T) {
@@ -298,7 +321,7 @@ func TestCreateDB(t *testing.T) {
 			useCase.name,
 			func(t *testing.T) {
 				if useCase.originalInstanceName != "" {
-					svc.dbSnapshots[useCase.originalInstanceName] = []*rds.DBSnapshot{
+					svc.dbSnapshots[*useCase.snapshot.DBInstanceIdentifier] = []*rds.DBSnapshot{
 						useCase.snapshot,
 					}
 				}
@@ -316,19 +339,25 @@ func TestCreateDB(t *testing.T) {
 					svc,
 				)
 				if err != nil {
-					if fmt.Sprintf("%s", err) != useCase.expectedError {
+					if err.Error() != useCase.expectedError {
 						t.Errorf(
 							"Unexpected error %s",
 							err,
 						)
 					}
-				}
-				if endpoint != useCase.endpoint {
+				} else if useCase.expectedError != "" {
 					t.Errorf(
-						"Unexpected output: %s should be %s",
-						endpoint,
-						useCase.endpoint,
+						"Expected error %s didn't happened",
+						useCase.expectedError,
 					)
+				} else {
+					if endpoint != useCase.endpoint {
+						t.Errorf(
+							"Unexpected output: %s should be %s",
+							endpoint,
+							useCase.endpoint,
+						)
+					}
 				}
 			},
 		)
@@ -358,7 +387,7 @@ var getLastSnapshotCases = []getLastSnapshotCase{
 		identifier:    "production",
 		snapshots:     []*rds.DBSnapshot{},
 		snapshot:      nil,
-		expectedError: "Snapshot not found",
+		expectedError: "There are no Snapshots for production",
 	},
 }
 
@@ -388,7 +417,7 @@ func TestGetLastSnapshot(t *testing.T) {
 							useCase.snapshot,
 						)
 					}
-				} else if fmt.Sprintf("%s", err) != useCase.expectedError {
+				} else if err.Error() != useCase.expectedError {
 					t.Errorf(
 						"Unexpected error %s",
 						err,
@@ -399,129 +428,13 @@ func TestGetLastSnapshot(t *testing.T) {
 	}
 }
 
-type getCreateDBInstanceInputCase struct {
-	name                          string
-	identifier                    string
-	createDBParams                CreateDBParams
-	snapshot                      *rds.DBSnapshot
-	expectedCreateDBInstanceInput *rds.CreateDBInstanceInput
-	expectedError                 string
-}
-
-var getCreateDBInstanceInputCases = []getCreateDBInstanceInputCase{
-	// Params without Snapshot
-	{
-		name:       "Params without Snapshot",
-		identifier: "production",
-		createDBParams: CreateDBParams{
-			DBInstanceType: "db.m1.medium",
-			DBUser:         "owner",
-			DBPassword:     "password",
-			Size:           5,
-		},
-		snapshot: nil,
-		expectedCreateDBInstanceInput: &rds.CreateDBInstanceInput{
-			AllocatedStorage:     aws.Int64(5),
-			DBInstanceIdentifier: aws.String("production"),
-			DBInstanceClass:      aws.String("db.m1.medium"),
-			MasterUsername:       aws.String("owner"),
-			MasterUserPassword:   aws.String("password"),
-			Engine:               aws.String("postgres"),
-			EngineVersion:        aws.String("9.4.11"),
-			DBSecurityGroups: []*string{
-				aws.String("default"),
-			},
-			Tags: []*rds.Tag{
-				{
-					Key:   aws.String("Name"),
-					Value: aws.String("production"),
-				},
-			},
-		},
-		expectedError: "",
-	},
-	// Params with Snapshot
-	{
-		name:       "Params with Snapshot",
-		identifier: "production",
-		createDBParams: CreateDBParams{
-			DBInstanceType:       "db.m1.medium",
-			DBUser:               "owner",
-			DBPassword:           "password",
-			Size:                 5,
-			OriginalInstanceName: "production",
-		},
-		snapshot: exampleSnapshot1,
-		expectedCreateDBInstanceInput: &rds.CreateDBInstanceInput{
-			AllocatedStorage:     aws.Int64(10),
-			DBInstanceIdentifier: aws.String("production"),
-			DBInstanceClass:      aws.String("db.m1.medium"),
-			MasterUsername:       aws.String("owner"),
-			MasterUserPassword:   aws.String("password"),
-			Engine:               aws.String("postgres"),
-			EngineVersion:        aws.String("9.4.11"),
-			DBSecurityGroups: []*string{
-				aws.String("default"),
-			},
-			Tags: []*rds.Tag{
-				{
-					Key:   aws.String("Name"),
-					Value: aws.String("production"),
-				},
-			},
-		},
-		expectedError: "",
-	},
-}
-
-func equalsCreateDBInstanceInput(input1, input2 *rds.CreateDBInstanceInput) bool {
-	switch {
-	case *input1.AllocatedStorage != *input2.AllocatedStorage:
-		return false
-	case *input1.DBInstanceIdentifier != *input2.DBInstanceIdentifier:
-		return false
-	case *input1.DBInstanceClass != *input2.DBInstanceClass:
-		return false
-	case *input1.MasterUsername != *input2.MasterUsername:
-		return false
-	case *input1.MasterUserPassword != *input2.MasterUserPassword:
-		return false
-	}
-	return true
-}
-
-func TestGetCreateDBInstanceInput(t *testing.T) {
-	svc := newMockRDSClient()
-	for _, useCase := range getCreateDBInstanceInputCases {
-		t.Run(
-			useCase.name,
-			func(t *testing.T) {
-				if useCase.snapshot != nil {
-					svc.dbSnapshots[*useCase.snapshot.DBInstanceIdentifier] = []*rds.DBSnapshot{useCase.snapshot}
-				}
-				createDBInstanceInput := useCase.createDBParams.GetCreateDBInstanceInput(
-					useCase.identifier,
-					svc,
-				)
-				if !equalsCreateDBInstanceInput(createDBInstanceInput, useCase.expectedCreateDBInstanceInput) {
-					t.Errorf(
-						"Unexpected output: %s should be %s",
-						createDBInstanceInput,
-						useCase.expectedCreateDBInstanceInput,
-					)
-				}
-			},
-		)
-	}
-}
-
 type getRestoreDBInstanceFromDBSnapshotInputCase struct {
-	name                                         string
-	identifier                                   string
-	createDBParams                               CreateDBParams
-	snapshot                                     *rds.DBSnapshot
-	expectedRestoreDBInstanceFromDBSnapshotInput *rds.RestoreDBInstanceFromDBSnapshotInput
-	expectedError                                string
+	name                         string
+	identifier                   string
+	createDBParams               CreateDBParams
+	snapshot                     *rds.DBSnapshot
+	expectedRestoreSnapshotInput *rds.RestoreDBInstanceFromDBSnapshotInput
+	expectedError                string
 }
 
 var getRestoreDBInstanceFromDBSnapshotInputCases = []getRestoreDBInstanceFromDBSnapshotInputCase{
@@ -537,13 +450,42 @@ var getRestoreDBInstanceFromDBSnapshotInputCases = []getRestoreDBInstanceFromDBS
 			OriginalInstanceName: "production",
 		},
 		snapshot: exampleSnapshot1,
-		expectedRestoreDBInstanceFromDBSnapshotInput: &rds.RestoreDBInstanceFromDBSnapshotInput{
+		expectedRestoreSnapshotInput: &rds.RestoreDBInstanceFromDBSnapshotInput{
 			DBInstanceClass:      aws.String("db.m1.medium"),
 			DBInstanceIdentifier: aws.String("production"),
 			DBSnapshotIdentifier: aws.String("rds:production-2015-06-11"),
 			Engine:               aws.String("postgres"),
 		},
 		expectedError: "",
+	},
+	// Params with Snapshot without OriginalInstanceName
+	{
+		name:       "Params with Snapshot without OriginalInstanceName",
+		identifier: "production",
+		createDBParams: CreateDBParams{
+			DBInstanceType: "db.m1.medium",
+			DBUser:         "owner",
+			DBPassword:     "password",
+			Size:           5,
+		},
+		snapshot:                     exampleSnapshot1,
+		expectedRestoreSnapshotInput: nil,
+		expectedError:                "Original Instance Name was empty",
+	},
+	// Params with non existing Snapshot
+	{
+		name:       "Params with non existing Snapshot",
+		identifier: "production",
+		createDBParams: CreateDBParams{
+			DBInstanceType:       "db.m1.medium",
+			DBUser:               "owner",
+			DBPassword:           "password",
+			Size:                 5,
+			OriginalInstanceName: "develop",
+		},
+		snapshot:                     exampleSnapshot1,
+		expectedRestoreSnapshotInput: nil,
+		expectedError:                "Couldn't find snapshot for develop instance",
 	},
 }
 
@@ -570,17 +512,29 @@ func TestGetRestoreDBInstanceFromDBSnapshotInput(t *testing.T) {
 				if useCase.snapshot != nil {
 					svc.dbSnapshots[*useCase.snapshot.DBInstanceIdentifier] = []*rds.DBSnapshot{useCase.snapshot}
 				}
-				restoreDBInstanceFromDBSnapshotInput := useCase.createDBParams.GetRestoreDBInstanceFromDBSnapshotInput(
+				restoreSnapshotInput, err := useCase.createDBParams.GetRestoreDBInstanceFromDBSnapshotInput(
 					useCase.identifier,
 					svc,
 				)
-				// if !equalsRestoreDBInstanceFromDBSnapshotInput(restoreDBInstanceFromDBSnapshotInput, useCase.expectedRestoreDBInstanceFromDBSnapshotInput) {
-				if !equalsRestoreDBInstanceFromDBSnapshotInput(restoreDBInstanceFromDBSnapshotInput, useCase.expectedRestoreDBInstanceFromDBSnapshotInput) {
-					t.Errorf(
-						"Unexpected output: %s should be %s",
-						restoreDBInstanceFromDBSnapshotInput,
-						useCase.expectedRestoreDBInstanceFromDBSnapshotInput,
-					)
+				if err != nil {
+					if useCase.expectedError == "" ||
+						err.Error() != useCase.expectedError {
+						t.Errorf(
+							"Unexpected error happened: %v",
+							err,
+						)
+					}
+				} else {
+					if !equalsRestoreDBInstanceFromDBSnapshotInput(
+						restoreSnapshotInput,
+						useCase.expectedRestoreSnapshotInput,
+					) {
+						t.Errorf(
+							"Unexpected output: %s should be %s",
+							restoreSnapshotInput,
+							useCase.expectedRestoreSnapshotInput,
+						)
+					}
 				}
 			},
 		)
